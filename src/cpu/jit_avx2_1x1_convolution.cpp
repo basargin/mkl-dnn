@@ -179,7 +179,8 @@ void jit_avx2_1x1_convolution_bwd_data_t::execute_backward_data() {
     const auto &jcp = kernel_->jcp;
 
     // TODO (Roma): remove this restriction
-    assert(jcp.stride_w == 1 && jcp.stride_h == 1);
+    // XXX: (basargin) strides debug // assert(jcp.stride_w == 1 && jcp.stride_h == 1);
+    assert(jcp.stride_h == 1); // XXX: (basargin) strides debug
     const int ndims = diff_dst_d.ndims();
 
     const int stride_h = (ndims == 3) ? 1 : conf_.desc()->strides[0];
