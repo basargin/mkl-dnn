@@ -129,7 +129,7 @@ void compute_ref_direct_fwd(const prb_t *p, dnn_mem_t &src_m,
 void compute_ref_direct_bwd_d(const prb_t *p, dnn_mem_t &diff_src_m,
         dnn_mem_t &wei_m, dnn_mem_t &bia_m, dnn_mem_t &diff_dst_m) {
     enum { precompute_size = 16 };
-    const bool fast = MAX2(p->kh, p->kw) <= precompute_size;
+    const bool fast = false;// XXX: MAX2(p->kh, p->kw) <= precompute_size;
 
     /* pre-computes arrays of oh(ow) and kh(kw) for traversing in kernel */
     auto precompute_ok = [](int i, int O, int K, int S, int P, int D,
@@ -171,6 +171,7 @@ void compute_ref_direct_bwd_d(const prb_t *p, dnn_mem_t &diff_src_m,
     };
 
     auto ker = [&](float &ds, int g, int mb, int ic, int id, int ih, int iw) {
+    	print(0, "\tker(mb:%d, g:%d, ic:%d, id:%d, ih:%d, iw:%d):\n", mb, g, ic, id, ih, iw);
         for (int oc = 0; oc < p->oc/p->g; ++oc) {
             for (int kd = 0; kd < p->kd; ++kd) {
                 int od = id - kd * (p->dd + 1) + p->pd;
@@ -191,8 +192,14 @@ void compute_ref_direct_bwd_d(const prb_t *p, dnn_mem_t &diff_src_m,
 
                         size_t dst_off = dst_off_f(p, mb, g, oc, od, oh, ow);
                         size_t wei_off = wei_off_f(p, g, oc, ic, kd, kh, kw);
-                        ds += ((float*)diff_dst_m)[dst_off]
-                        * ((float*)wei_m)[wei_off];
+                        float dst = ((float*)diff_dst_m)[dst_off];
+						float wei = ((float*)wei_m)[wei_off];
+						float mul = dst * wei;
+						ds += mul;
+                        //ds += ((float*)diff_dst_m)[dst_off]
+                        // * ((float*)wei_m)[wei_off];
+                        print(0, "\t\t+ %8g = dst:%8g[%04lu@(mb:%d, g:%d, oc:%d, od:%d, oh:%d, ow:%d)] * wei:%8g[%04lu@(g:%d, oc:%d, ic:%d, kd:%d, kh:%d, kw:%d)]\n",
+                        		      mul,       dst, dst_off,  mb,    g,    oc,    od,    oh,    ow,  wei,wei_off, g,     oc,    ic,    kd,    kh,    kw      );
                     }
                 }
             }
@@ -214,6 +221,7 @@ void compute_ref_direct_bwd_d(const prb_t *p, dnn_mem_t &diff_src_m,
     mkldnn::impl::parallel_nd(p->g, p->mb, p->ic / p->g, p->id, p->ih, p->iw,
         [&](int g, int mb, int ic, int id, int ih, int iw) {
             size_t src_off = src_off_f(p, mb, g, ic, id, ih, iw);
+            print(0, "src[%04lu@(mb:%d, g:%d, ic:%d, id:%d, ih:%d, iw:%d)] = \n", src_off, mb, g, ic, id, ih, iw);
             float &ds = ((float*)diff_src_m)[src_off];
             ds = 0;
             if (fast)
@@ -226,6 +234,8 @@ void compute_ref_direct_bwd_d(const prb_t *p, dnn_mem_t &diff_src_m,
                 ds += ((float*)bia_m)[bia_off];
             }
             maybe_scale(ds, g * p->ic / p->g + ic);
+            print(0, "=\t\t %8g \n", ds);
+            //print(0, "%s", "==================================================================================================\n");
         }
     );
 }
