@@ -220,6 +220,15 @@ void jit_avx2_1x1_conv_kernel_f32::generate_reduce_loop(
                 vmovups(output_ptr(i, j), vreg_accum(i, j));
             }
 
+        // XXX: (basargin) strides debug <beg>
+        if (jcp.stride_w > 1) { // Fill Zero Src rows according to <stride_w>
+            vxorps(vzero, vzero, vzero);
+            for (int j = 0; j < jcp.stride_w - 1; ++j)
+                for (int i = 0; i < load_loop_blk; ++i) {
+                    vmovups(output_ptr(i, j + 1), vzero);
+                }
+        }
+        // XXX: (basargin) strides debug <end>
         L(store_done);
     };
 
@@ -520,7 +529,8 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
     args_ok = true
         && jcp.oc % simd_w == 0 && jcp.ic % simd_w == 0
         && jcp.t_pad == 0 && jcp.l_pad == 0
-        && jcp.stride_w == 1 && jcp.stride_h == 1 // TODO: support some strides
+        //&& jcp.stride_w == 1 && jcp.stride_h == 1 // XXX: (basargin) enable strides debug // TODO: support some strides
+        && jcp.stride_h == 1                        // XXX: (basargin) not for stride_h
         && jcp.kh == 1 && jcp.kw == 1;
     if (!args_ok) return status::unimplemented;
 
@@ -569,6 +579,11 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
         bcast_blocking_max = 192;
         reduce_blocking = 128; // affects L1$ utilization
     } else if (jcp.prop_kind == backward_data) {
+
+        // XXX: (basargin) strides debug : use one reg only to compute non-zero src[,,,iw] for one iw
+        if (jcp.stride_w > 1) // XXX: (basargin)
+            jcp.ur = 1;       // XXX: (basargin)
+
         jcp.reduce_dim = jcp.oc;
         jcp.reduce_block = jcp.oc_block;
 
@@ -577,6 +592,12 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
 
         jcp.bcast_dim = jcp.os;
         jcp.bcast_block = jcp.ur;
+        
+        // XXX: (basargin) strides debug <beg>
+        if (jcp.stride_w > 1)
+            jcp.bcast_block = jcp.ow - 1;
+        int num_substeps = jcp.bcast_block / jcp.ur;
+        // XXX: (basargin) strides debug <end>
 
         jcp.reduce_loop_unroll = jcp.reduce_block;
         jcp.reduce_loop_bcast_step
@@ -584,10 +605,24 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
         jcp.reduce_loop_load_step
             = jcp.reduce_loop_unroll * jcp.ic * sizeof(float);
 
-        jcp.bcast_loop_output_step = jcp.ur * jcp.ic_block * sizeof(float);
-        jcp.bcast_loop_output_substep = -1; // unused
-        jcp.bcast_loop_bcast_step = jcp.ur * jcp.oc_block * sizeof(float);
-        jcp.bcast_loop_bcast_substep = -1; // unused
+
+        // XXX: (basargin) strides debug <beg>
+        if (jcp.stride_w > 1)
+        {
+            jcp.bcast_loop_output_substep = (jcp.ur + jcp.stride_w - 1) * jcp.ic_block * sizeof(float);
+            jcp.bcast_loop_output_step = num_substeps * jcp.bcast_loop_output_substep;
+
+            jcp.bcast_loop_bcast_substep = jcp.ur * jcp.oc_block * sizeof(float);
+            jcp.bcast_loop_bcast_step = (num_substeps + 1) * jcp.bcast_loop_bcast_substep;
+        }
+        else // XXX: (basargin) strides debug <end>
+        {
+            jcp.bcast_loop_output_step = jcp.ur * jcp.ic_block * sizeof(float);
+            jcp.bcast_loop_output_substep = -1; // unused
+            jcp.bcast_loop_bcast_step = jcp.ur * jcp.oc_block * sizeof(float);
+            jcp.bcast_loop_bcast_substep = -1; // unused
+        }
+
 
         jcp.load_loop_load_step = jcp.oc_block * jcp.ic_block * sizeof(float);
         jcp.load_loop_iter_step = jcp.ic_block;
