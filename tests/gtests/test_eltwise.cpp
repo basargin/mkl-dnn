@@ -20,6 +20,12 @@
 #include "mkldnn.hpp"
 #include "cpu_isa_traits.hpp"
 
+#define DO_TEST_F16  (1) // Enable testing for data type float16
+#define DO_TEST_BF16 (1) // Enable testing for data type bfloat16
+#define DO_TEST_F32  (1) // Enable testing for data type float32
+#define DO_TEST_S32  (1) // Enable testing for data type int32
+#define DO_TEST_S8   (1) // Enable testing for data type int8
+
 namespace mkldnn {
 
 template <typename T, typename A> inline T relu_fwd(T s, A alpha) {
@@ -164,20 +170,62 @@ void check_eltwise_fwd(const eltwise_test_params &p,
     }
 }
 
+template <typename data_t> data_t fwd_eps(algorithm alg)
+{
+    UNUSED(alg);
+    return 0;
+}
+
+template<> float fwd_eps<float>(algorithm alg)
+{
+    return (alg == algorithm::eltwise_elu) ? 2e-5f
+        : (alg == algorithm::eltwise_soft_relu) ? 2e-6f
+        : 1e-6f;
+}
+
+static const float FWD_EPS_F16 = 5e-2f;
+
+template<> bfloat16_t fwd_eps<bfloat16_t>(algorithm alg)
+{
+    UNUSED(alg);
+    return FWD_EPS_F16;
+}
+
+template<> float16_t fwd_eps<float16_t>(algorithm alg)
+{
+    UNUSED(alg);
+    return FWD_EPS_F16;
+}
+
 template <typename data_t>
 void compare_eltwise_fwd(const eltwise_test_params &p,
         const memory::desc &md, const memory &dst, const memory &ref_dst)
 {
-    const data_t eps = (data_traits<data_t>::data_type == memory::data_type::f16
-            || data_traits<data_t>::data_type == memory::data_type::bf16)
-            ? 5e-2
-            : (p.alg_kind == algorithm::eltwise_elu)
-                ? 2e-5
-                : (p.alg_kind == algorithm::eltwise_soft_relu) ? 2e-6 : 1e-6;
-
-    compare_data(ref_dst, dst, eps);
+    compare_data(ref_dst, dst, fwd_eps<data_t>(p.alg_kind));
 }
 
+template <typename data_t> data_t bwd_eps(algorithm alg)
+{
+    UNUSED(alg);
+    return 0;
+}
+
+template<> float bwd_eps<float>(algorithm alg)
+{
+    return (alg == algorithm::eltwise_soft_relu
+            || alg == algorithm::eltwise_tanh) ? 2e-6f
+        : 1e-6f;
+}
+
+template<> bfloat16_t bwd_eps<bfloat16_t>(algorithm alg)
+{
+    return bwd_eps<float>(alg);
+}
+
+template<> float16_t bwd_eps<float16_t>(algorithm alg)
+{
+    return bwd_eps<float>(alg);
+}
 
 template <typename data_t>
 void check_eltwise_bwd(const eltwise_test_params &p,
@@ -193,10 +241,7 @@ void check_eltwise_bwd(const eltwise_test_params &p,
     const mkldnn::impl::memory_desc_wrapper data_mdw(data_d.data);
     const mkldnn::impl::memory_desc_wrapper diff_data_mdw(diff_data_d.data);
 
-    const data_t eps = (p.alg_kind == algorithm::eltwise_soft_relu
-            || p.alg_kind == algorithm::eltwise_tanh)
-        ? 2e-6
-        : 1e-6;
+    data_t eps = bwd_eps<data_t>(p.alg_kind);
 
     memory::dim n = n_elems(md);
     for (memory::dim i = 0; i < n; ++i) {
@@ -267,7 +312,8 @@ protected:
         strm = stream(eng);
 
         Forward();
-        if (data_type != memory::data_type::f16) {
+        if (data_type == memory::data_type::f32
+        	|| data_type == memory::data_type::bf16) {
             Backward();
         }
     }
@@ -284,7 +330,7 @@ protected:
                 = p.alg_kind == algorithm::eltwise_elu
                 ? data_t(1.0)
                 : p.alg_kind == algorithm::eltwise_square
-                    ? data_t(6.0) : data_t(200.0);
+                    ? data_t(6.0) : data_t(100.0);
         fill_data<data_t>(n_elems(*data_desc), src, data_median, data_deviation);
         check_zero_tail<data_t>(1, src);
 
@@ -311,7 +357,7 @@ protected:
         data_t data_deviation = p.alg_kind == algorithm::eltwise_elu
                 ? data_t(1.0)
                 : p.alg_kind == algorithm::eltwise_square
-                    ? data_t(6.0) : data_t(200.0);
+                    ? data_t(6.0) : data_t(100.0);
         fill_data<data_t>(n_elems(diff_data_desc), diff_dst, data_median,
                 data_deviation);
         check_zero_tail<data_t>(1, diff_dst);
@@ -332,17 +378,29 @@ protected:
     }
 };
 
-using eltwise_test_half = eltwise_test<float16_t>;
-using eltwise_test_float = eltwise_test<float>;
-using eltwise_test_bfloat16 = eltwise_test<bfloat16_t>;
+using eltwise_test_f16 = eltwise_test<float16_t>;
+using eltwise_test_bf16 = eltwise_test<bfloat16_t>;
+using eltwise_test_f32 = eltwise_test<float>;
+using eltwise_test_s32 = eltwise_test<int>;
+using eltwise_test_s8 = eltwise_test<int8_t>;
 
-TEST_P(eltwise_test_half, TestsEltwise)
+TEST_P(eltwise_test_f16, TestsEltwise)
 {
 }
-TEST_P(eltwise_test_float, TestsEltwise)
+
+TEST_P(eltwise_test_bf16, TestsEltwise)
 {
 }
-TEST_P(eltwise_test_bfloat16, TestsEltwise)
+
+TEST_P(eltwise_test_f32, TestsEltwise)
+{
+}
+
+TEST_P(eltwise_test_s32, TestsEltwise)
+{
+}
+
+TEST_P(eltwise_test_s8, TestsEltwise)
 {
 }
 
@@ -370,19 +428,64 @@ TEST_P(eltwise_test_bfloat16, TestsEltwise)
     EXPAND(PARAMS(eltwise_bounded_relu, __VA_ARGS__)), \
     EXPAND(PARAMS(eltwise_logistic, __VA_ARGS__))
 
+#if defined(DO_TEST_BF16) && DO_TEST_BF16
+    #define CPU_INST_TEST_CASE_BF16(str, ...) _CPU_INST_TEST_CASE(str, bf16, __VA_ARGS__);
+    #define INST_TEST_CASE_BF16(str, ...) _INST_TEST_CASE(str, bf16, __VA_ARGS__);
+#else
+    #define CPU_INST_TEST_CASE_BF16(str, ...)
+    #define INST_TEST_CASE_BF16(str, ...)
+#endif
+
+#define _CPU_INST_TEST_CASE(str, data_t, ...) CPU_INSTANTIATE_TEST_SUITE_P( \
+        str##_##data_t, eltwise_test_##data_t, ::testing::Values(__VA_ARGS__))
+
+#define _INST_TEST_CASE(str, data_t, ...) INSTANTIATE_TEST_SUITE_P_( \
+        str##_##data_t, eltwise_test_##data_t, ::testing::Values(__VA_ARGS__))
+
+#if defined(DO_TEST_F16) && DO_TEST_F16
+    #define GPU_INST_TEST_CASE_F16(str, ...) GPU_INSTANTIATE_TEST_SUITE_P_( \
+        TEST_CONCAT(str, _f16), eltwise_test_f16, ::testing::Values(__VA_ARGS__));
+#else
+    #define GPU_INST_TEST_CASE_F16(str, ...)
+#endif
+
+#if defined(DO_TEST_F32) && DO_TEST_F32
+    #define CPU_INST_TEST_CASE_F32(str, ...) _CPU_INST_TEST_CASE(str, f32, __VA_ARGS__);
+    #define INST_TEST_CASE_F32(str, ...) _INST_TEST_CASE(str, f32, __VA_ARGS__);
+#else
+    #define CPU_INST_TEST_CASE_F32(str, ...)
+    #define INST_TEST_CASE_F32(str, ...)
+#endif
+
+#if defined(DO_TEST_S32) && DO_TEST_S32
+    #define CPU_INST_TEST_CASE_S32(str, ...) _CPU_INST_TEST_CASE(str, s32, __VA_ARGS__);
+    #define INST_TEST_CASE_S32(str, ...) _INST_TEST_CASE(str, s32, __VA_ARGS__);
+#else
+    #define CPU_INST_TEST_CASE_S32(str, ...)
+    #define INST_TEST_CASE_S32(str, ...)
+#endif
+
+#if defined(DO_TEST_S8) && DO_TEST_S8
+    #define CPU_INST_TEST_CASE_S8(str, ...) _CPU_INST_TEST_CASE(str, s8, __VA_ARGS__);
+    #define INST_TEST_CASE_S8(str, ...) _INST_TEST_CASE(str, s8, __VA_ARGS__);
+#else
+    #define CPU_INST_TEST_CASE_S8(str, ...)
+    #define INST_TEST_CASE_S8(str, ...)
+#endif
+
+
 #define CPU_INST_TEST_CASE(str, ...) \
-    CPU_INSTANTIATE_TEST_SUITE_P( \
-        TEST_CONCAT(str, _f32), eltwise_test_float, ::testing::Values(__VA_ARGS__)); \
-    CPU_INSTANTIATE_TEST_SUITE_P( \
-        TEST_CONCAT(str, _bf16), eltwise_test_bfloat16, ::testing::Values(__VA_ARGS__))
+	CPU_INST_TEST_CASE_BF16(str, __VA_ARGS__) \
+    CPU_INST_TEST_CASE_F32(str, __VA_ARGS__) \
+    CPU_INST_TEST_CASE_S32(str, __VA_ARGS__) \
+    CPU_INST_TEST_CASE_S8(str, __VA_ARGS__) \
 
 #define INST_TEST_CASE(str, ...) \
-    GPU_INSTANTIATE_TEST_SUITE_P_( \
-        TEST_CONCAT(str, _f16), eltwise_test_half, ::testing::Values(__VA_ARGS__)); \
-    INSTANTIATE_TEST_SUITE_P_( \
-        TEST_CONCAT(str, _f32), eltwise_test_float, ::testing::Values(__VA_ARGS__)); \
-    CPU_INSTANTIATE_TEST_SUITE_P( \
-        TEST_CONCAT(str, _bf16), eltwise_test_bfloat16, ::testing::Values(__VA_ARGS__))
+    GPU_INST_TEST_CASE_F16(str, __VA_ARGS__) \
+    INST_TEST_CASE_BF16(str, __VA_ARGS__) \
+    INST_TEST_CASE_F32(str, __VA_ARGS__) \
+    INST_TEST_CASE_S32(str, __VA_ARGS__) \
+    INST_TEST_CASE_S8(str, __VA_ARGS__) \
 
 CPU_INST_TEST_CASE(SimpleZeroDim,
     PARAMS_ALL_ALG(ncdhw, nCdhw8c, 0.1f, 0.f, 0, 2, 4, 4, 4),

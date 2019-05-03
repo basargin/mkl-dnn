@@ -79,7 +79,7 @@ private:
     enum {
         _cmp_le_os = jit_generator::_cmp_le_os,
         _cmp_nle_us = jit_generator::_cmp_nle_us,
-        _op_floor = jit_generator::_op_floor,
+        _op_floor = jit_generator::_op_floor
     };
 
     size_t vlen = cpu_isa_traits<isa>::vlen;
