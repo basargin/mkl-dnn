@@ -80,7 +80,7 @@ private:
     enum {
         _cmp_le_os = jit_generator::_cmp_le_os,
         _cmp_nle_us = jit_generator::_cmp_nle_us,
-        _op_floor = jit_generator::_op_floor,
+        _op_floor = jit_generator::_op_floor
     };
 
     size_t vlen = cpu_isa_traits<isa>::vlen;
@@ -128,7 +128,7 @@ private:
     void bounded_relu_prepare_table();
 };
 
-struct jit_uni_eltwise_kernel_f32;
+struct jit_uni_eltwise_kernel;
 
 template <cpu_isa_t isa>
 struct jit_uni_eltwise_fwd_t : public cpu_primitive_t {
@@ -145,8 +145,6 @@ struct jit_uni_eltwise_fwd_t : public cpu_primitive_t {
     jit_uni_eltwise_fwd_t(const pd_t *apd);
     ~jit_uni_eltwise_fwd_t();
 
-    typedef typename prec_traits<data_type::f32>::type data_t;
-
     virtual status_t execute(const exec_ctx_t &ctx) const override {
         execute_forward(ctx);
         return status::success;
@@ -155,7 +153,7 @@ struct jit_uni_eltwise_fwd_t : public cpu_primitive_t {
 private:
     void execute_forward(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd(); }
-    jit_uni_eltwise_kernel_f32 *kernel_;
+    jit_uni_eltwise_kernel *kernel_;
 };
 
 template <cpu_isa_t isa>
@@ -183,7 +181,7 @@ struct jit_uni_eltwise_bwd_t : public cpu_primitive_t {
 private:
     void execute_backward(const exec_ctx_t &ctx) const;
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd(); }
-    jit_uni_eltwise_kernel_f32 *kernel_;
+    jit_uni_eltwise_kernel *kernel_;
 };
 
 }

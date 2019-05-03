@@ -724,108 +724,231 @@ template struct jit_uni_eltwise_injector_f32<sse41>;
 
 
 struct jit_args {
-    const float *from;
-    const float *for_comparison;
-    const float *to;
+    const void *from;
+    const void *for_comparison;
+    const void *to;
     size_t work_amount;
 };
 
-struct jit_uni_eltwise_kernel_f32 : public c_compatible {
+struct jit_uni_eltwise_kernel : public c_compatible {
+    enum {
+        _rnd_trunc = 3u // Round toward zero
+    };
+
     const eltwise_desc_t &desc_;
 
     void (*ker_)(const jit_args *);
-    void operator()(const jit_args *args) { assert(ker_); ker_(args); }
+    void operator()(const jit_args *args) {
+        assert(ker_);
+        ker_(args);
+    }
 
-    jit_uni_eltwise_kernel_f32(const eltwise_desc_t &desc)
+    jit_uni_eltwise_kernel(const eltwise_desc_t &desc)
         : desc_(desc), ker_(nullptr) {}
-    virtual ~jit_uni_eltwise_kernel_f32() {}
+    virtual ~jit_uni_eltwise_kernel() {}
 
 protected:
     bool is_bwd() const { return desc_.prop_kind == prop_kind::backward_data; }
+    mkldnn_data_type_t data_type() const { return desc_.data_desc.data_type; }
+    size_t data_type_size() const { return types::data_type_size(data_type()); }
 };
 
 /* jit kernels */
 namespace {
 
 template <cpu_isa_t isa>
-struct jit_uni_relu_kernel_f32 : public jit_uni_eltwise_kernel_f32,
+struct jit_uni_relu_kernel : public jit_uni_eltwise_kernel,
     public jit_generator
 {
-    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_relu_kernel_f32)
+    DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_relu_kernel)
 
-    void compute_step(bool vectorize, const int uf, const int shift) {
-        for (int i = 0; i < uf; i++) {
+    void compute_step(bool vectorize, const size_t uf, const size_t shift) {
+        using namespace data_type;
+        bool is32bit = utils::one_of(data_type(), s32, f32);
+        bool isInt = utils::one_of(data_type(), s32, s8);
+
+        auto vreg_from = [&](const size_t i) -> Vmm { return Vmm(i + 1); };
+        auto xreg_from = [&](const size_t i) -> Xmm { return Xmm(i + 1); };
+        auto vreg_for_comparison = [&](const size_t i) -> Vmm { return Vmm(uf + i + 1); };
+        auto xreg_for_comparison = [&](const size_t i) -> Xmm { return Xmm(uf + i + 1); };
+        auto vreg_to = [&](const size_t i) -> Vmm { return Vmm(2*uf + i + 1); };
+        auto xreg_to = [&](const size_t i) -> Xmm { return Xmm(2*uf + i + 1); };
+        auto yreg_to = [&](const size_t i) -> Ymm { return Ymm(2*uf + i + 1); };
+
+        // 1. Load
+        for (size_t i = 0; i < uf; i++) {
             if (vectorize) {
-                uni_vmovups(Vmm(i + 1), ptr[reg_from + i * shift]);
-                if (is_bwd())
-                    uni_vmovups(Vmm(uf + i + 1),
+                // load full Vmm size
+                if (is32bit) {
+                    uni_vmovups(vreg_from(i), ptr[reg_from + i * shift]);
+                    if (is_bwd())
+                        uni_vmovups(vreg_for_comparison(i),
                                 ptr[reg_for_comparison + i * shift]);
+                } else {
+                    // data type s8 load as s32
+                    if (isa == sse41)
+                        pmovsxbd(vreg_from(i), ptr[reg_from + i * shift]);
+                    else
+                        vpmovsxbd(vreg_from(i), ptr[reg_from + i * shift]);
+                    if (is_bwd()) {
+                        if (isa == sse41)
+                            pmovsxbd(vreg_for_comparison(i),
+                                    ptr[reg_for_comparison + i * shift]);
+                        else
+                            vpmovsxbd(vreg_for_comparison(i),
+                                    ptr[reg_for_comparison + i * shift]);
+                    }
+                }
             } else {
-                movss(Xmm(i + 1), ptr[reg_from + i * shift]);
-                if (is_bwd())
-                    movss(Xmm(uf + i + 1),
-                          ptr[reg_for_comparison + i * shift]);
+                // load exactly one data item
+                if (is32bit) {
+                    movss(xreg_from(i), ptr[reg_from + i * shift]);
+                    if (is_bwd())
+                        movss(xreg_for_comparison(i),
+                                ptr[reg_for_comparison + i * shift]);
+                } else {
+                    // data type s8 load as s32
+                    mov(reg_s8.cvt8(), ptr[reg_from + i * shift]);
+                    movsx(reg_s8.cvt32(), reg_s8.cvt8());
+                    movq(xreg_from(i), reg_s8);
+                    if (is_bwd()) {
+                        mov(reg_s8.cvt8(), ptr[reg_for_comparison + i * shift]);
+                        movsx(reg_s8.cvt32(), reg_s8.cvt8());
+                        movq(xreg_for_comparison(i), reg_s8);
+                    }
+                }
             }
         }
 
+        // 2. Process
         if (isa == sse41) {
-            for (int i = 0; i < uf; i++) {
-                movups(Vmm(2 * uf + i + 1), Vmm(i + 1));
-                mulps(Vmm(2 * uf + i + 1), vmm_ns);
+            for (size_t i = 0; i < uf; i++) {
+                if (isInt)
+                    cvtdq2ps(vreg_from(i), vreg_from(i));
+                movups(vreg_to(i), vreg_from(i));
+                mulps(vreg_to(i), vmm_ns);
 
                 Vmm mask = Vmm(0);
                 if (is_bwd()) {
-                    movups(mask, Vmm(uf + i + 1));
-                    cmpps(mask, vmm_zero, _cmp_nle_us);
+                    movups(mask, vreg_for_comparison(i));
+                    if (isInt)
+                        pcmpgtd(mask, vmm_zero);
+                    else
+                        cmpps(mask, vmm_zero, _cmp_nle_us);
                 } else {
-                    movups(mask, Vmm(i + 1));
+                    movups(mask, vreg_from(i));
                     cmpps(mask, vmm_zero, _cmp_nle_us);
                 }
-                blendvps(Vmm(2 * uf + i + 1), Vmm(i + 1));
+                blendvps(vreg_to(i), vreg_from(i));
+                if (isInt) {
+                    uni_vroundps(vreg_to(i), vreg_to(i), _rnd_trunc);
+                    cvtps2dq(vreg_to(i), vreg_to(i));
+                }
             }
         } else {
-            for (int i = 0; i < uf; i++) {
-                vmulps(Vmm(2 * uf + i + 1), Vmm(i + 1), vmm_ns);
+            for (size_t i = 0; i < uf; i++) {
+                if (isInt)
+                    vcvtdq2ps(vreg_from(i), vreg_from(i));
+                vmulps(vreg_to(i), vreg_from(i), vmm_ns);
                 if (isa == avx2) {
-                    if (is_bwd())
-                        vcmpgtps(vmm_mask, Vmm(uf + i + 1), vmm_zero);
-                    else
-                        vcmpgtps(vmm_mask, Vmm(i + 1), vmm_zero);
+                    if (is_bwd()) {
+                        if (isInt)
+                            vpcmpgtd(vmm_mask, vreg_for_comparison(i), vmm_zero);
+                        else
+                            vcmpgtps(vmm_mask, vreg_for_comparison(i), vmm_zero);
+                    } else
+                        vcmpgtps(vmm_mask, vreg_from(i), vmm_zero);
 
-                    vblendvps(Vmm(2 * uf + i + 1), Vmm(2 * uf + i + 1),
-                              Vmm(i + 1), vmm_mask);
+                    vblendvps(vreg_to(i), vreg_to(i), vreg_from(i), vmm_mask);
 
-                } else {
-                    if (is_bwd())
-                        vcmpps(k_mask, Vmm(uf + i + 1), vmm_zero, _cmp_nle_us);
-                    else
-                        vcmpps(k_mask, Vmm(i + 1), vmm_zero, _cmp_nle_us);
-                    vblendmps(Vmm(2 * uf + i + 1) | k_mask, Vmm(2 * uf + i + 1),
-                              Vmm(i + 1));
+                    if (isInt) {
+                        uni_vroundps(vreg_to(i), vreg_to(i), _rnd_trunc);
+                        vcvtps2dq(vreg_to(i), vreg_to(i));
+                    }
+                } else { // avx512
+                    if (is_bwd()) {
+                        if (isInt)
+                            vpcmpgtd(k_mask, vreg_for_comparison(i), vmm_zero);
+                        else
+                            vcmpps(k_mask, vreg_for_comparison(i), vmm_zero, _cmp_nle_us);
+                    } else
+                        vcmpps(k_mask, vreg_from(i), vmm_zero, _cmp_nle_us);
+                    vblendmps(vreg_to(i) | k_mask, vreg_to(i), vreg_from(i));
+                    if (isInt) {
+                        vcvtps2dq(vreg_to(i) | T_rz_sae, vreg_to(i));
+                    }
                 }
             }
         }
 
-        for (int i = 0; i < uf; i++) {
+        // 3. Store
+        for (size_t i = 0; i < uf; i++) {
             if (vectorize) {
-                uni_vmovups(ptr[reg_to + i * shift], Vmm(2 * uf + i + 1));
+                // store full Vmm size
+                if (is32bit)
+                    uni_vmovups(ptr[reg_to + i * shift], vreg_to(i));
+                else {
+                    if (isa == avx512_common) {
+                        vpmovsdb(ptr[reg_to + i * shift], vreg_to(i));
+                    } else if (isa == avx2) {
+                        // s32 -> s16 = {qw0, 0, qw1, 0}
+                        vpackssdw(vreg_to(i), vreg_to(i), vmm_zero);
+
+                        // permute to restore order{qw0, 0, qw1, 0} -> {qw0, qw1, 0, 0}
+                        vpermq(yreg_to(i), yreg_to(i), 0x58);
+
+                        // s16 -> s8 : {16 x s16}{16 x 0} -> {32 x s8}
+                        vpacksswb(vreg_to(i), vreg_to(i), vmm_zero);
+                        vmovq(ptr[reg_to + i * shift], xreg_to(i));
+                    } else { // sse41
+                        // s32 -> s16
+                        packssdw(vreg_to(i), vmm_zero);
+
+                        // s16 -> s8
+                        packsswb(vreg_to(i), vmm_zero);
+                        movd(ptr[reg_to + i * shift], xreg_to(i));
+                    }
+                }
             } else {
-                movss(ptr[reg_to + i * shift], Xmm(2 * uf + i + 1));
+                // store exactly one data item
+                if (is32bit)
+                    movss(ptr[reg_to + i * shift], xreg_to(i));
+                else {
+                    // s32 save as s8
+                    if (isa == avx512_common) {
+                        vpmovsdb(ptr[reg_to + i * shift], vreg_to(i) | k_mask_s8);
+                    } else {
+                        if (isa == avx2) {
+                            vpackssdw(vreg_to(i), vreg_to(i), vmm_zero);
+                            vpacksswb(vreg_to(i), vreg_to(i), vmm_zero);
+                            vmovd(reg_s8.cvt32(), xreg_to(i));
+                        } else { // sse41
+                            packssdw(vreg_to(i), vmm_zero);
+                            packsswb(vreg_to(i), vmm_zero);
+                            movd(reg_s8.cvt32(), xreg_to(i));
+                        }
+                        mov(ptr[reg_to + i * shift], reg_s8.cvt8());
+                    }
+                }
             }
         }
     }
 
-    jit_uni_relu_kernel_f32(const eltwise_desc_t &desc)
-        : jit_uni_eltwise_kernel_f32(desc), jit_generator() {
+    jit_uni_relu_kernel(const eltwise_desc_t &desc)
+        : jit_uni_eltwise_kernel(desc), jit_generator() {
         assert(desc.alg_kind == alg_kind::eltwise_relu);
         assert(isa == sse41 || isa == avx2 || isa == avx512_common);
 
         Reg64 param = abi_param1;
-
-        const int simd_w = cpu_isa_traits<isa>::vlen / sizeof(float);
-        const int loop_dec[] = {simd_w, 1};
-        const int uf[] = {1, 1};
-        const int shift[] = {cpu_isa_traits<isa>::vlen, sizeof(float)};
+        
+        // f32 used for processing of any data type
+        // thus we need to take into account size of f32
+        const size_t proc_dt_size = sizeof(typename prec_traits<data_type::f32>::type);
+        const size_t vlen = cpu_isa_traits<isa>::vlen;
+        const size_t simd_w = vlen / proc_dt_size;
+        const size_t loop_dec[] = {simd_w, 1};
+        const size_t uf[] = {1, 1};
+        const size_t shift[] = {data_type_size() * (vlen / proc_dt_size), data_type_size()};
         const bool loop_vectorize[] = {true, false};
 
         this->preamble();
@@ -841,6 +964,11 @@ struct jit_uni_relu_kernel_f32 : public jit_uni_eltwise_kernel_f32,
         uni_vbroadcastss(vmm_ns, xmm_ns);
 
         uni_vpxor(vmm_zero, vmm_zero, vmm_zero);
+        xor_(reg_s8, reg_s8);
+        if (isa == avx512_common) {
+            mov(reg_s8.cvt8(), 0x01);
+            kmovw(k_mask_s8, reg_s8.cvt32());
+        }
 
         Label loop_label[3];
 
@@ -867,14 +995,14 @@ struct jit_uni_relu_kernel_f32 : public jit_uni_eltwise_kernel_f32,
     }
 
 private:
-    using Vmm = typename utils::conditional3<isa == sse41, Xmm,
-                                             isa == avx2, Ymm, Zmm>::type;
+    using Vmm = typename cpu_isa_traits<isa>::Vmm;
 
     Reg64 reg_from = rax;
     Reg64 reg_for_comparison = is_bwd() ? rdx : reg_from;
     Reg64 reg_to = r8;
     Reg64 reg_work_amount = rsi;
     Reg64 imm_addr64 = rbx;
+    Reg64 reg_s8 = r9;
 
     Xmm xmm_ns = Xmm(14);
 
@@ -883,15 +1011,16 @@ private:
 
     Vmm vmm_mask = Vmm(isa == avx512_common ? 28 : 12);
     Opmask k_mask = Opmask(1);
+    Opmask k_mask_s8 = Opmask(2); // Mask for store 1 byte in case of AVX512
 };
 
 template <cpu_isa_t isa>
-struct jit_uni_kernel_fwd_f32: public jit_uni_eltwise_kernel_f32,
+struct jit_uni_kernel_fwd_f32: public jit_uni_eltwise_kernel,
     public jit_generator {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_uni_kernel_fwd_f32)
 
     jit_uni_kernel_fwd_f32(const eltwise_desc_t &desc)
-        : jit_uni_eltwise_kernel_f32(desc), jit_generator() {
+        : jit_uni_eltwise_kernel(desc), jit_generator() {
 
         eltwise_injector_ = new jit_uni_eltwise_injector_f32<isa>(this,
                 desc.alg_kind, desc.alpha, desc.beta, false, r9, Opmask(1));
@@ -899,6 +1028,7 @@ struct jit_uni_kernel_fwd_f32: public jit_uni_eltwise_kernel_f32,
         using namespace alg_kind;
 
         assert(is_bwd() == false);
+        assert(data_type() == data_type::f32);
         assert(utils::one_of(desc.alg_kind, eltwise_tanh, eltwise_elu,
                     eltwise_square, eltwise_abs, eltwise_sqrt, eltwise_linear,
                     eltwise_bounded_relu, eltwise_soft_relu, eltwise_logistic));
@@ -981,16 +1111,26 @@ private:
 template <cpu_isa_t isa>
 status_t jit_uni_eltwise_fwd_t<isa>::pd_t::init() {
     using namespace alg_kind;
+    using namespace data_type;
+
+    // relu supports f32, s32 and s8
+    bool relu_ok = true
+        && desc()->alg_kind == eltwise_relu
+        && utils::one_of(desc()->data_desc.data_type, f32, s32, s8);
+
+    // others supports only f32
+    bool non_relu_ok = true
+        && utils::one_of(desc()->alg_kind,
+                eltwise_tanh, eltwise_elu, eltwise_square, eltwise_abs,
+                eltwise_sqrt, eltwise_linear, eltwise_bounded_relu,
+                eltwise_soft_relu, eltwise_logistic)
+        && desc()->data_desc.data_type == f32;
 
     bool ok = true
         && mayiuse(isa)
         && is_fwd()
-        && utils::everyone_is(data_type::f32, desc()->data_desc.data_type)
+        && utils::one_of(true, relu_ok, non_relu_ok)
         && !has_zero_dim_memory()
-        && utils::one_of(desc()->alg_kind, eltwise_relu, eltwise_tanh,
-                eltwise_elu, eltwise_square, eltwise_abs, eltwise_sqrt,
-                eltwise_linear, eltwise_bounded_relu, eltwise_soft_relu,
-                eltwise_logistic)
         && memory_desc_wrapper(src_md()).is_dense(true)
         && IMPLICATION(!memory_desc_wrapper(src_md()).is_dense(false),
                 math::eltwise_fwd_preserves_zero(desc()->alg_kind, true))
@@ -1005,7 +1145,7 @@ jit_uni_eltwise_fwd_t<isa>::jit_uni_eltwise_fwd_t(const pd_t *apd)
     const auto &desc = *pd()->desc();
     switch (desc.alg_kind) {
     case alg_kind::eltwise_relu:
-        kernel_ = new jit_uni_relu_kernel_f32<isa>(desc); break;
+        kernel_ = new jit_uni_relu_kernel<isa>(desc); break;
     default:
         kernel_ = new jit_uni_kernel_fwd_f32<isa>(desc);
     }
@@ -1017,29 +1157,30 @@ jit_uni_eltwise_fwd_t<isa>::~jit_uni_eltwise_fwd_t()
 
 template <cpu_isa_t isa>
 void jit_uni_eltwise_fwd_t<isa>::execute_forward(const exec_ctx_t &ctx) const {
-    auto src = CTX_IN_MEM(const data_t *, MKLDNN_ARG_SRC);
-    auto dst = CTX_OUT_MEM(data_t *, MKLDNN_ARG_DST);
+    auto src = CTX_IN_MEM(const uint8_t *, MKLDNN_ARG_SRC);
+    auto dst = CTX_OUT_MEM(uint8_t *, MKLDNN_ARG_DST);
 
     const memory_desc_wrapper data_d(pd()->src_md());
 
     const size_t nelems = data_d.nelems(true);
+    const size_t dt_size = data_d.data_type_size();
 
-    src += data_d.offset0();
-    dst += data_d.offset0();
+    src += data_d.offset0() * dt_size;
+    dst += data_d.offset0() * dt_size;
 
     parallel(0, [&](const int ithr, const int nthr) {
         size_t start{0}, end{0};
 
-        const int cache_line = 16;
+        const int cache_line = 64 / dt_size;
 
         balance211(utils::div_up(nelems, cache_line), nthr, ithr, start, end);
         start = nstl::min(nelems, start * cache_line);
         end = nstl::min(nelems, end * cache_line);
 
         auto arg = jit_args();
-        arg.from = &src[start];
-        arg.for_comparison = &src[start];
-        arg.to = &dst[start];
+        arg.from = &src[start * dt_size];
+        arg.for_comparison = &src[start * dt_size];
+        arg.to = &dst[start * dt_size];
         arg.work_amount = end - start;
         if (arg.work_amount)
             (*kernel_)(&arg);
@@ -1067,7 +1208,7 @@ jit_uni_eltwise_bwd_t<isa>::jit_uni_eltwise_bwd_t(const pd_t *apd)
     const auto &desc = *pd()->desc();
     switch (desc.alg_kind) {
     case alg_kind::eltwise_relu:
-        kernel_ = new jit_uni_relu_kernel_f32<isa>(desc); break;
+        kernel_ = new jit_uni_relu_kernel<isa>(desc); break;
     default: assert(!"unknown eltwise alg_kind");
     }
 }

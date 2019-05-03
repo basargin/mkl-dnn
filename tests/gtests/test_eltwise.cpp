@@ -19,6 +19,11 @@
 
 #include "mkldnn.hpp"
 
+#define DO_TEST_F16 (1) // Enable testing for data type float16
+#define DO_TEST_F32 (1) // Enable testing for data type float32
+#define DO_TEST_S32 (1) // Enable testing for data type int32
+#define DO_TEST_S8  (1) // Enable testing for data type int8
+
 namespace mkldnn {
 
 template <typename T, typename A> inline T relu_fwd(T s, A alpha) {
@@ -259,7 +264,7 @@ protected:
         strm = stream(eng);
 
         Forward();
-        if (data_type != memory::data_type::f16) {
+        if (data_type == memory::data_type::f32) {
             Backward();
         }
     }
@@ -325,16 +330,27 @@ protected:
     }
 };
 
-using eltwise_test_half = eltwise_test<float16_t>;
-using eltwise_test_float = eltwise_test<float>;
+using eltwise_test_f16 = eltwise_test<float16_t>;
+using eltwise_test_f32 = eltwise_test<float>;
+using eltwise_test_s32 = eltwise_test<int>;
+using eltwise_test_s8 = eltwise_test<int8_t>;
 
-TEST_P(eltwise_test_half, TestsEltwise)
+TEST_P(eltwise_test_f16, TestsEltwise)
 {
 }
 
-TEST_P(eltwise_test_float, TestsEltwise)
+TEST_P(eltwise_test_f32, TestsEltwise)
 {
 }
+
+TEST_P(eltwise_test_s32, TestsEltwise)
+{
+}
+
+TEST_P(eltwise_test_s8, TestsEltwise)
+{
+}
+
 #define EXPAND(args) args
 
 #define EXPAND_FORMATS(data) memory::format_tag::data
@@ -359,14 +375,54 @@ TEST_P(eltwise_test_float, TestsEltwise)
     EXPAND(PARAMS(eltwise_bounded_relu, __VA_ARGS__)), \
     EXPAND(PARAMS(eltwise_logistic, __VA_ARGS__))
 
-#define CPU_INST_TEST_CASE(str, ...) CPU_INSTANTIATE_TEST_SUITE_P( \
-        str, eltwise_test_float, ::testing::Values(__VA_ARGS__))
+#define _CPU_INST_TEST_CASE(str, data_t, ...) CPU_INSTANTIATE_TEST_SUITE_P( \
+        str##_##data_t, eltwise_test_##data_t, ::testing::Values(__VA_ARGS__))
+
+#define _INST_TEST_CASE(str, data_t, ...) INSTANTIATE_TEST_SUITE_P_( \
+        str##_##data_t, eltwise_test_##data_t, ::testing::Values(__VA_ARGS__))
+
+#if defined(DO_TEST_F16) && DO_TEST_F16
+    #define GPU_INST_TEST_CASE_F16(str, ...) GPU_INSTANTIATE_TEST_SUITE_P_( \
+        TEST_CONCAT(str, _f16), eltwise_test_f16, ::testing::Values(__VA_ARGS__));
+#else
+    #define GPU_INST_TEST_CASE_F16(str, ...)
+#endif
+
+#if defined(DO_TEST_F32) && DO_TEST_F32
+    #define CPU_INST_TEST_CASE_F32(str, ...) _CPU_INST_TEST_CASE(str, f32, __VA_ARGS__);
+    #define INST_TEST_CASE_F32(str, ...) _INST_TEST_CASE(str, f32, __VA_ARGS__);
+#else
+    #define CPU_INST_TEST_CASE_F32(str, ...)
+    #define INST_TEST_CASE_F32(str, ...)
+#endif
+
+#if defined(DO_TEST_S32) && DO_TEST_S32
+    #define CPU_INST_TEST_CASE_S32(str, ...) _CPU_INST_TEST_CASE(str, s32, __VA_ARGS__);
+    #define INST_TEST_CASE_S32(str, ...) _INST_TEST_CASE(str, s32, __VA_ARGS__);
+#else
+    #define CPU_INST_TEST_CASE_S32(str, ...)
+    #define INST_TEST_CASE_S32(str, ...)
+#endif
+
+#if defined(DO_TEST_S8) && DO_TEST_S8
+    #define CPU_INST_TEST_CASE_S8(str, ...) _CPU_INST_TEST_CASE(str, s8, __VA_ARGS__);
+    #define INST_TEST_CASE_S8(str, ...) _INST_TEST_CASE(str, s8, __VA_ARGS__);
+#else
+    #define CPU_INST_TEST_CASE_S8(str, ...)
+    #define INST_TEST_CASE_S8(str, ...)
+#endif
+
+
+#define CPU_INST_TEST_CASE(str, ...) \
+    CPU_INST_TEST_CASE_F32(str, __VA_ARGS__) \
+    CPU_INST_TEST_CASE_S32(str, __VA_ARGS__) \
+    CPU_INST_TEST_CASE_S8(str, __VA_ARGS__) \
 
 #define INST_TEST_CASE(str, ...) \
-    GPU_INSTANTIATE_TEST_SUITE_P_( \
-        TEST_CONCAT(str, _f16), eltwise_test_half, ::testing::Values(__VA_ARGS__)); \
-    INSTANTIATE_TEST_SUITE_P_( \
-        TEST_CONCAT(str, _f32), eltwise_test_float, ::testing::Values(__VA_ARGS__))
+    GPU_INST_TEST_CASE_F16(str, __VA_ARGS__) \
+    INST_TEST_CASE_F32(str, __VA_ARGS__) \
+    INST_TEST_CASE_S32(str, __VA_ARGS__) \
+    INST_TEST_CASE_S8(str, __VA_ARGS__) \
 
 CPU_INST_TEST_CASE(SimpleZeroDim,
     PARAMS_ALL_ALG(ncdhw, nCdhw8c, 0.1f, 0.f, 0, 2, 4, 4, 4),
