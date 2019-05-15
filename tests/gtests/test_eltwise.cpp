@@ -168,19 +168,49 @@ void check_eltwise_fwd(const eltwise_test_params &p,
     }
 }
 
+template <typename data_t> data_t fwd_eps(algorithm alg)
+{
+    UNUSED(alg);
+    return 0;
+}
+
+template<> float fwd_eps<float>(algorithm alg)
+{
+    return (alg == algorithm::eltwise_elu) ? 2e-5f
+        : (alg == algorithm::eltwise_soft_relu) ? 2e-6f
+        : 1e-6f;
+}
+
+template<> float16_t fwd_eps<float16_t>(algorithm alg)
+{
+    UNUSED(alg);
+    return 5e-2f;
+}
+
 template <typename data_t>
 void compare_eltwise_fwd(const eltwise_test_params &p,
         const memory::desc &md, const memory &dst, const memory &ref_dst)
 {
-    data_t eps = (data_traits<data_t>::data_type == memory::data_type::f16)
-            ? 5e-2
-            : (p.alg_kind == algorithm::eltwise_elu)
-                ? 2e-5
-                : (p.alg_kind == algorithm::eltwise_soft_relu) ? 2e-6 : 1e-6;
-
-    compare_data(ref_dst, dst, eps);
+    compare_data(ref_dst, dst, fwd_eps<data_t>(p.alg_kind));
 }
 
+template <typename data_t> data_t bwd_eps(algorithm alg)
+{
+    UNUSED(alg);
+    return 0;
+}
+
+template<> float bwd_eps<float>(algorithm alg)
+{
+    return (alg == algorithm::eltwise_soft_relu
+            || alg == algorithm::eltwise_tanh) ? 2e-5f
+        : 1e-6f;
+}
+
+template<> float16_t bwd_eps<float16_t>(algorithm alg)
+{
+    return bwd_eps<float>(alg);
+}
 
 template <typename data_t>
 void check_eltwise_bwd(const eltwise_test_params &p,
@@ -198,10 +228,7 @@ void check_eltwise_bwd(const eltwise_test_params &p,
     const mkldnn::impl::memory_desc_wrapper data_mdw(data_d.data);
     const mkldnn::impl::memory_desc_wrapper diff_data_mdw(diff_data_d.data);
 
-    const data_t eps = (p.alg_kind == algorithm::eltwise_soft_relu
-            || p.alg_kind == algorithm::eltwise_tanh)
-        ? 2e-6
-        : 1e-6;
+    data_t eps = bwd_eps<data_t>(p.alg_kind);
 
     memory::dim n = n_elems(md);
     for (memory::dim i = 0; i < n; ++i) {
