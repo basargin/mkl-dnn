@@ -281,7 +281,7 @@ protected:
                 = p.alg_kind == algorithm::eltwise_elu
                 ? data_t(1.0)
                 : p.alg_kind == algorithm::eltwise_square
-                    ? data_t(6.0) : data_t(200.0);
+                    ? data_t(6.0) : data_t(100.0);
         fill_data<data_t>(n_elems(*data_desc), src, data_median, data_deviation);
         check_zero_tail<data_t>(1, src);
 
@@ -308,7 +308,7 @@ protected:
         data_t data_deviation = p.alg_kind == algorithm::eltwise_elu
                 ? data_t(1.0)
                 : p.alg_kind == algorithm::eltwise_square
-                    ? data_t(6.0) : data_t(200.0);
+                    ? data_t(6.0) : data_t(100.0);
         fill_data<data_t>(n_elems(diff_data_desc), diff_dst, data_median,
                 data_deviation);
         check_zero_tail<data_t>(1, diff_dst);
